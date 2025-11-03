@@ -6,22 +6,9 @@ from dassl.engine import build_trainer
 import numpy as np
 from utils.train_eval_util import set_val_loader, set_ood_loader_ImageNet, set_mnist_loader
 from utils.detection_util import get_and_print_results
-from utils.plot_util import plot_distribution
 import trainers.locoop
-import trainers.zsclip
 import trainers.zsclip_contra
-import trainers.clipn
-import trainers.TAG
-import trainers.zsclip_contra_OT
 import trainers.locproto_supc
-import datasets.imagenet
-import datasets.dermamnist
-import datasets.chest
-import datasets.food101
-import datasets.oxford_flowers
-import datasets.fgvc_aircraft
-import datasets.stanford_cars
-import datasets.eurosat
 import datasets.skin40
 import datasets.ISIC
 import datasets.Dermnet
@@ -179,7 +166,6 @@ def main(args):
         get_and_print_results(args, in_score_mcm, out_score_mcm,
                               auroc_list_mcm, aupr_list_mcm, fpr_list_mcm)
         
-        plot_distribution(args, in_score_mcm, out_score_mcm, out_dataset, score='MCM')
 
     print("MCM avg. FPR:{}, AUROC:{}, AUPR:{}".format(np.mean(fpr_list_mcm), np.mean(auroc_list_mcm), np.mean(aupr_list_mcm)))
 
@@ -231,7 +217,7 @@ if __name__ == "__main__":
     # augment for LoCoOp
     parser.add_argument('--lambda_value', type=float, default=1,
                         help='temperature parameter')
-    parser.add_argument('--topk', type=int, default=200,
+    parser.add_argument('--topk', type=int, default=50,
                         help='topk')
     # augment for MCM and GL-MCM
     parser.add_argument('-b', '--batch-size', default=128, type=int,
