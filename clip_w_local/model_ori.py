@@ -1,11 +1,11 @@
 from collections import OrderedDict
 from typing import Tuple, Union
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-import math
-import torch.nn.init as init
+
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -63,18 +63,12 @@ class AttentionPool2d(nn.Module):
         self.c_proj = nn.Linear(embed_dim, output_dim or embed_dim)
         self.num_heads = num_heads
 
-    def forward(self, x, if_pos=True):
-        b, c, h, w = x.shape
-        x_local = x.reshape(b, c, h, w).permute(0, 2, 3, 1)
-
-        x_local = F.linear(x_local, self.v_proj.weight, self.v_proj.bias)
-        x_local = F.linear(x_local, self.c_proj.weight, self.c_proj.bias)
-
-        x = x.flatten(start_dim=2).permute(2, 0, 1)  # NCHW -> (HW)NC
+    def forward(self, x):
+        x = x.reshape(x.shape[0], x.shape[1], x.shape[2] * x.shape[3]).permute(2, 0, 1)  # NCHW -> (HW)NC
         x = torch.cat([x.mean(dim=0, keepdim=True), x], dim=0)  # (HW+1)NC
         x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (HW+1)NC
         x, _ = F.multi_head_attention_forward(
-            query=x[:1], key=x, value=x,
+            query=x, key=x, value=x,
             embed_dim_to_check=x.shape[-1],
             num_heads=self.num_heads,
             q_proj_weight=self.q_proj.weight,
@@ -91,10 +85,9 @@ class AttentionPool2d(nn.Module):
             use_separate_proj_weight=True,
             training=self.training,
             need_weights=False
-        ) 
+        )
 
-        x_local = x_local.reshape(b, h * w, -1)
-        return x.squeeze(0), x_local
+        return x[0]
 
 
 class ModifiedResNet(nn.Module):
@@ -152,9 +145,9 @@ class ModifiedResNet(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
-        # x = self.attnpool(x)
-        x_global, x_local = self.attnpool(x)
-        return x_global, x_local
+        x = self.attnpool(x)
+
+        return x
 
 
 class LayerNorm(nn.LayerNorm):
@@ -185,40 +178,15 @@ class ResidualAttentionBlock(nn.Module):
         self.ln_2 = LayerNorm(d_model)
         self.attn_mask = attn_mask
 
-    def attention(self, x: torch.Tensor, mask=None):
-        if self.attn_mask is not None:
-            self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device)
-            return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
-        elif mask is not None:
-            mask = mask.to(dtype=x.dtype, device=x.device)
-            return self.attn(x, x, x, need_weights=False, key_padding_mask=mask)[0]
-        else:
-            self.attn_mask = None
-            return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
-
-
-    def attention_weight(self, x: torch.Tensor):  # ADDED
+    def attention(self, x: torch.Tensor):
         self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
-        return self.attn(x, x, x, need_weights=True, attn_mask=self.attn_mask)[1]
+        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
 
-    def forward(self, x: torch.Tensor, return_attention: bool = False, mask=None):
-        y = self.ln_1(x)
-        y = y.permute(1, 0, 2)
-        y = F.linear(y, self.attn.in_proj_weight, self.attn.in_proj_bias)   # multi-head的in_proj
-        N, L, C = y.shape
-        y = y.view(N, L, 3, C // 3).permute(2, 0, 1, 3).reshape(3 * N, L, C // 3)
-        y = F.linear(y, self.attn.out_proj.weight, self.attn.out_proj.bias)     # multi-head的out_proj
-        q, k, v = y.tensor_split(3, dim=0)  # 得到q k v
-        v = v.permute(1, 0, 2)
-        q = q.permute(1, 0, 2)
-        k = k.permute(1, 0, 2)
-        v += x
-        v = v + self.mlp(self.ln_2(v))
-
-        x = x + self.attention(self.ln_1(x), mask)
+    def forward(self, x: torch.Tensor):
+        x = x + self.attention(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
+        return x
 
-        return x, q, k, v
 
 class Transformer(nn.Module):
     def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None):
@@ -227,36 +195,15 @@ class Transformer(nn.Module):
         self.layers = layers
         self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask) for _ in range(layers)])
 
-    def forward(self, x: torch.Tensor, mask=None):
-        # return self.resblocks(x)
-        for i in range(self.layers):
-            x, q, k, v = self.resblocks[i](x, mask=mask)
-        return x, q, k, v
-
-class Adapter(nn.Module):
-    def __init__(self, c_in, reduction=4):
-        super(Adapter, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(c_in, c_in // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(c_in // reduction, c_in, bias=False),
-            nn.ReLU(inplace=True)
-        )
-        for m in self.fc:
-            if isinstance(m, nn.Linear):
-                init.zeros_(m.weight)
-
-
-    def forward(self, x):
-        x = self.fc(x)
-        return x
+    def forward(self, x: torch.Tensor):
+        return self.resblocks(x)
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, is_mine=False):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int):
         super().__init__()
-        self.input_resolution = input_resolution # 224
-        self.output_dim = output_dim # 512
+        self.input_resolution = input_resolution
+        self.output_dim = output_dim
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
 
         scale = width ** -0.5
@@ -268,49 +215,25 @@ class VisionTransformer(nn.Module):
 
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
-        self.is_mine = is_mine
-        if is_mine==True:
-            # pass
-            self.linear = Adapter(output_dim)
 
-    def forward(self, x: torch.Tensor, text_feats=None, label=None, mask=None):
-        x = self.conv1(x)  # shape = [*, width, grid, grid]   [32, 768, 14, 14]
-        hw_shape = (x.shape[2], x.shape[3])
-        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]   [32, 768, 196]
-        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]     [32, 196, 768]
+    def forward(self, x: torch.Tensor):
+        x = self.conv1(x)  # shape = [*, width, grid, grid]
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
         x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
         x = x + self.positional_embedding.to(x.dtype)
         x = self.ln_pre(x)
 
-        x = x.permute(1, 0, 2)  # NLD -> LND   [196, 32, 768]
-        x, q, k, v = self.transformer(x, mask=mask)
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
-        q = q.permute(1, 0, 2)
-        k = k.permute(1, 0, 2)
-        v = v.permute(1, 0, 2)
-
-        v = self.ln_post(v)
-
-        q = q[:, 1:]
-        k = k[:, 1:]
-        v = v[:, 1:]
-
-        out = x[:, 1:]
-        B, _, C = out.shape
-        v = v.reshape(B, -1, C).contiguous()
 
         x = self.ln_post(x[:, 0, :])
 
         if self.proj is not None:
             x = x @ self.proj
-            feat = v @ self.proj
-        
-        if self.is_mine==True:  # and label!=None
-            ratio = 0.2
-            feat = (1 - ratio) * feat + ratio * self.linear(feat)    # [bs, 196, 512]
-            return x, feat, None
-        else:
-            return x, feat, None
+
+        return x
 
 
 class CLIP(nn.Module):
@@ -326,8 +249,7 @@ class CLIP(nn.Module):
                  vocab_size: int,
                  transformer_width: int,
                  transformer_heads: int,
-                 transformer_layers: int,
-                 is_mine: bool
+                 transformer_layers: int
                  ):
         super().__init__()
 
@@ -350,8 +272,7 @@ class CLIP(nn.Module):
                 width=vision_width,
                 layers=vision_layers,
                 heads=vision_heads,
-                output_dim=embed_dim,
-                is_mine=is_mine
+                output_dim=embed_dim
             )
 
         self.transformer = Transformer(
@@ -412,25 +333,26 @@ class CLIP(nn.Module):
     def dtype(self):
         return self.visual.conv1.weight.dtype
 
-    def encode_image(self, image, mask=None):
-        return self.visual(image.type(self.dtype), mask=mask)
+    def encode_image(self, image):
+        return self.visual(image.type(self.dtype))
 
     def encode_text(self, text):
         x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
 
         x = x + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
-        x, q, k, v = self.transformer(x)
+        x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
 
+        # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
         x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
 
         return x
 
     def forward(self, image, text):
-        image_features, local_feat = self.encode_image(image)
+        image_features = self.encode_image(image)
         text_features = self.encode_text(text)
 
         # normalized features
@@ -470,7 +392,7 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict, is_mine=False):
+def build_model(state_dict: dict):
     vit = "visual.proj" in state_dict
 
     if vit:
@@ -498,7 +420,7 @@ def build_model(state_dict: dict, is_mine=False):
     model = CLIP(
         embed_dim,
         image_resolution, vision_layers, vision_width, vision_patch_size,
-        context_length, vocab_size, transformer_width, transformer_heads, transformer_layers, is_mine
+        context_length, vocab_size, transformer_width, transformer_heads, transformer_layers
     )
 
     for key in ["input_resolution", "context_length", "vocab_size"]:
@@ -506,5 +428,5 @@ def build_model(state_dict: dict, is_mine=False):
             del state_dict[key]
 
     convert_weights(model)
-    model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(state_dict)
     return model.eval()

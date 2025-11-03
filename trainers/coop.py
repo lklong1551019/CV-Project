@@ -11,13 +11,13 @@ from dassl.metrics import compute_accuracy
 from dassl.utils import load_pretrained_weights, load_checkpoint
 from dassl.optim import build_optimizer, build_lr_scheduler
 
-from clip_w_local import clip
-# from clip_w_local import clip_clear as clip
+from clip_w_local import clip_clear as clip
 from clip_w_local.simple_tokenizer import SimpleTokenizer as _Tokenizer
 import numpy as np
 from tqdm import tqdm
 from PIL import Image
-# from .zsclip_clear import load_clip_to_cpu
+from .zsclip_contra import entropy_select_topk2, CUSTOM_TEMPLATES
+
 
 _tokenizer = _Tokenizer()
 softmax = nn.Softmax(dim=1).cuda()
@@ -37,25 +37,6 @@ def entropy_select_topk(p, top_k, label, num_of_local_feature):
         return torch.tensor([0]).cuda()
     return -torch.mean(torch.sum(selected_p * torch.log(selected_p+1e-5), 1))
 
-def entropy_select_topk2(p, top_k, label, num_of_local_feature=196):
-    """
-    Extract non-Top-K regions and calculate entropy.
-    """
-    bs = label.shape[0]
-    label_repeat = label.repeat_interleave(num_of_local_feature)   # [6272, 1000]
-    p = F.softmax(p, dim=-1)
-    entro = torch.sum(p * torch.log(p+1e-5), 1)
-    entro = entro.view(bs, 196)
-    topk_idx = torch.topk(entro, k=top_k, dim=1)[1]   # 熵最小的k个patch
-    mask = torch.zeros((bs, num_of_local_feature), dtype=torch.bool, device=p.device)
-    mask.scatter_(1, topk_idx, True)
-    # contains_label = pred_topk.eq(torch.tensor(label_repeat, device=label.device).unsqueeze(1)).any(dim=1)
-    # selected_p = p[~contains_label]
-
-    # if selected_p.shape[0] == 0:
-    #     return torch.tensor([0]).cuda()
-    # return -torch.mean(torch.sum(selected_p * torch.log(selected_p+1e-5), 1))
-    return mask
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -235,12 +216,28 @@ class CustomCLIP(nn.Module):
         self.image_features_store = []
         # self.image_encoder.register_forward_hook(image_hook(self))
         self.image_encoder.register_forward_hook(self.image_hook)
+        # self.device = clip_model.device
+
+        temp = CUSTOM_TEMPLATES[cfg.DATASET.NAME]
+        prompts = [temp.format(c.replace("_", " ")) for c in classnames]
+        print(f"Prompts: {prompts}")
+        prompts = torch.cat([clip.tokenize(p) for p in prompts])
+        self.device = torch.device("cuda")
+        prompts = prompts.to(self.device)
+        clip_model.to(self.device)
+
+        with torch.no_grad():
+            text_features = clip_model.encode_text(prompts)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+        self.zs_text_features = text_features
+        # self.clip_model = clip_model
 
     def image_hook(self, module, input, output):
         self.image_features_store.append(output[0])
 
     def forward(self, image, mask=None):
-        image_features, local_image_features, _ = self.image_encoder(image.type(self.dtype), mask)
+        image_features, local_image_features, _ = self.image_encoder(image.type(self.dtype), mask=mask)
 
         prompts = self.prompt_learner()
         tokenized_prompts = self.tokenized_prompts
@@ -255,12 +252,16 @@ class CustomCLIP(nn.Module):
 
         logits = logit_scale * image_features @ text_features.t()
         logits_local = logit_scale * local_image_features @ text_features.T
+        zs_logits = logit_scale * image_features @ self.zs_text_features.T
+        zs_logits_local = logit_scale * local_image_features @ self.zs_text_features.T
 
-        return logits, logits_local
+
+
+        return logits, logits_local, zs_logits, zs_logits_local
 
 
 @TRAINER_REGISTRY.register()
-class LoCoOp(TrainerX):
+class CoOp(TrainerX):
     """Local regularized Context Optimization (LoCoOp).
     """
 
@@ -315,42 +316,44 @@ class LoCoOp(TrainerX):
 
         if prec == "amp":
             with autocast():
-                output, output_local = self.model(image)
+                output, output_local, _, _ = self.model(image)
                 # calculate CoOp loss
                 loss_id = F.cross_entropy(output, label)
 
                 # calculate OOD regularization loss
-                batch_size, num_of_local_feature = output_local.shape[0], output_local.shape[1]
-                output_local = output_local.view(batch_size * num_of_local_feature, -1)
-                loss_en = - entropy_select_topk(output_local, self.top_k, label, num_of_local_feature)
+                # batch_size, num_of_local_feature = output_local.shape[0], output_local.shape[1]
+                # output_local = output_local.view(batch_size * num_of_local_feature, -1)
+                # loss_en = - entropy_select_topk(output_local, self.top_k, label, num_of_local_feature)
 
                 # calculate total loss for LoCoOp
-                loss = loss_id + self.lambda_value * loss_en
+                # loss = loss_id + self.lambda_value * loss_en
+                loss = loss_id
 
             self.optim.zero_grad()
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optim)
             self.scaler.update()
         else:
-            output, output_local = self.model(image)
+            output, output_local, _, _ = self.model(image)
 
             # calculate CoOp loss
             loss_id = F.cross_entropy(output, label) 
 
             # calculate OOD regularization loss
-            batch_size, num_of_local_feature = output_local.shape[0], output_local.shape[1]
-            output_local = output_local.view(batch_size * num_of_local_feature, -1)     
-            loss_en = - entropy_select_topk(output_local, self.top_k, label, num_of_local_feature)
+            # batch_size, num_of_local_feature = output_local.shape[0], output_local.shape[1]
+            # output_local = output_local.view(batch_size * num_of_local_feature, -1)     
+            # loss_en = - entropy_select_topk(output_local, self.top_k, label, num_of_local_feature)
 
             # calculate total loss for LoCoOp
-            loss = loss_id + self.lambda_value * loss_en
+            # loss = loss_id + self.lambda_value * loss_en
+            loss = loss_id
 
             self.model_backward_and_update(loss)
 
         loss_summary = {
             "loss": loss.item(),
             "loss_id": loss_id.item(),
-            "loss_en": loss_en.item(),
+            # "loss_en": loss_en.item(),
             "acc": compute_accuracy(output, label)[0].item(),
         }
 
@@ -404,7 +407,6 @@ class LoCoOp(TrainerX):
     def test(self, split=None):
         """A generic testing pipeline."""
         self.model.image_features_store = []
-        self.label = []
         self.set_model_mode("eval")
         self.evaluator.reset()
 
@@ -425,7 +427,7 @@ class LoCoOp(TrainerX):
         for batch_idx, batch in enumerate(tqdm(data_loader)):
             input, label = self.parse_batch_test(batch)
             output = self.model_inference(input)
-            if len(output) == 2:
+            if len(output) >= 2:
                 output = output[0]
             self.label.append(label)
             self.evaluator.process(output, label)
@@ -456,7 +458,8 @@ class LoCoOp(TrainerX):
                 images, label = self.parse_batch_test(batch)
             else:
                 images = images.cuda()
-            output, output_local = self.model_inference(images)
+            images = images.cuda()
+            output, output_local, _, _ = self.model_inference(images)
             output /= 100.0
             output_local /= 100.0
             smax_global = to_np(F.softmax(output/T, dim=-1))
@@ -490,12 +493,12 @@ class LoCoOp(TrainerX):
                 images = images.cuda()
                 labels = labels.cuda()
             images = images.cuda()
-            output, output_local = self.model_inference(images)
+            output, output_local, zs_output, zs_local = self.model_inference(images)
             # pred_topk = torch.topk(output, k=self.cfg.topk, dim=-1)[1]
             # top2_correct = (pred_topk == labels.view(-1, 1)).any(dim=1).float().mean()
             pred = torch.argmax(output, dim=-1)
             batch_size, num_of_local_feature, _ = output_local.shape
-            output_local_ = output_local.view(batch_size * num_of_local_feature, -1)
+            output_local_ = zs_local.view(batch_size * num_of_local_feature, -1)
 
             selected = entropy_select_topk2(p=output_local_, top_k=self.cfg.topk, label=labels)  # 取正确结果在top-k里面的出来,mask掉
             selected = selected.view(batch_size, num_of_local_feature)
@@ -503,7 +506,7 @@ class LoCoOp(TrainerX):
             # attention_mask[selected] = 1
             attention_mask = torch.zeros((batch_size, 1), dtype=torch.bool, device=output.device)
             attention_mask = torch.cat((attention_mask, selected), dim=1)
-            output2, _ = self.model_inference(images, mask=attention_mask)
+            output2, _, zs_output2, _ = self.model_inference(images, mask=attention_mask)
 
             output /= 100.0
             output_local /= 100.0
@@ -513,19 +516,19 @@ class LoCoOp(TrainerX):
             smax_local = to_np(F.softmax(output_local/T, dim=-1))
             # smax_global2 = to_np(F.softmax(output2/T, dim=-1))
             smax_global2 = to_np(output2)
-            # mcm_global_score = -np.max(smax_global, axis=1)
+            mcm_global_score = -np.max(smax_global, axis=1)
             mcm_global_score0 = -np.max(smax_global0, axis=1)
-            score = to_np(F.softmax((smax_global-smax_global2)/T, dim=-1))
-            contr_score = -np.max(np.abs(smax_global+0.5*(smax_global-smax_global2)), axis=1)  # smax_global+0.5*
+            # score = to_np(F.softmax((smax_global-smax_global2)/T, dim=-1))
+            contr_score = -np.max(np.abs(smax_global+0.5*(to_np(zs_output)-to_np(zs_output2))), axis=1)  # smax_global+0.5*
             # mcm_global_score = -(np.abs(to_np(torch.gather(smax_global, 1, pred.unsqueeze(-1))-torch.gather(smax_global2, 1, pred.unsqueeze(-1))).squeeze(-1)))
             # mcm_global_score = -to_np(1.5*smax_global[pred] - 0.5*smax_global2[pred])
             # mcm_global_score = -to_np((1.5*torch.gather(smax_global, 1, pred.unsqueeze(-1)) - 0.5*torch.gather(smax_global2, 1, pred.unsqueeze(-1))).squeeze(-1))
             mcm_local_score = -np.max(smax_local, axis=(1, 2))
-            mcm_score.append(mcm_global_score0)
+            mcm_score.append(mcm_global_score)
             glmcm_score.append(contr_score)   # mcm_global_score+mcm_local_score
             loc_score.append(mcm_local_score)
 
-        return concat(mcm_score)[:len(data_loader.dataset)].copy(), concat(glmcm_score)[:len(data_loader.dataset)].copy(), concat(loc_score)[:len(data_loader.dataset)].copy(), concat(loc_score)[:len(data_loader.dataset)].copy()
+        return concat(mcm_score)[:len(data_loader.dataset)].copy(), concat(glmcm_score)[:len(data_loader.dataset)].copy(), concat(loc_score)[:len(data_loader.dataset)].copy()
 
     @torch.no_grad()
     def test_visualize(self, img_path, label):
@@ -551,11 +554,4 @@ class LoCoOp(TrainerX):
         contains_label = pred_topk.eq(torch.tensor(label_repeat).unsqueeze(1)).any(dim=1)
 
         return contains_label
-    def parse_batch_test(self, batch):
-        input = batch["img"]
-        label = batch["label"]
-
-        input = input.to(self.device)
-        label = label.to(self.device)
-
-        return input, label
+    

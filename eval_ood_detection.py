@@ -4,12 +4,28 @@ from dassl.utils import setup_logger, set_random_seed, collect_env_info
 from dassl.config import get_cfg_default
 from dassl.engine import build_trainer
 import numpy as np
-from utils.train_eval_util import set_val_loader, set_ood_loader_ImageNet
+from utils.train_eval_util import set_val_loader, set_ood_loader_ImageNet, set_mnist_loader
 from utils.detection_util import get_and_print_results
 from utils.plot_util import plot_distribution
 import trainers.locoop
+import trainers.zsclip
+import trainers.zsclip_contra
+import trainers.clipn
+import trainers.TAG
+import trainers.zsclip_contra_OT
+import trainers.locproto_supc
 import datasets.imagenet
-
+import datasets.dermamnist
+import datasets.chest
+import datasets.food101
+import datasets.oxford_flowers
+import datasets.fgvc_aircraft
+import datasets.stanford_cars
+import datasets.eurosat
+import datasets.skin40
+import datasets.ISIC
+import datasets.Dermnet
+from os import path as osp
 
 def print_args(args, cfg):
     print("***************")
@@ -50,6 +66,10 @@ def reset_cfg(cfg, args):
     if args.topk:
         cfg.topk = args.topk
 
+    cfg.in_dataset = args.in_dataset
+    cfg.is_bonder = args.is_bonder
+    cfg.is_dense = args.is_dense
+
 
 def extend_cfg(cfg):
     """
@@ -73,6 +93,15 @@ def extend_cfg(cfg):
 
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
 
+    cfg.Adapter = CN()
+    cfg.Adapter.Layer_ID = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    cfg.Adapter.Scale = 1.0
+    cfg.Adapter.Down_Rate = 256
+    cfg.Adapter.Attn = True
+    cfg.Adapter.MLP = True
+    cfg.Adapter.Visual = False
+    cfg.Adapter.Text = False
+
 
 def setup_cfg(args):
     cfg = get_cfg_default()
@@ -92,7 +121,7 @@ def setup_cfg(args):
     # 4. From optional input arguments
     cfg.merge_from_list(args.opts)
 
-    cfg.freeze()
+    # cfg.freeze()
 
     return cfg
 
@@ -114,38 +143,46 @@ def main(args):
     print("Collecting env info ...")
     print("** System info **\n{}\n".format(collect_env_info()))
 
-    if args.in_dataset in ['imagenet']:
-        out_datasets = ['iNaturalist', 'SUN', 'places365', 'Texture']
+    if 'mnist' in args.in_dataset:
+        id_data_loader, ood_loader = set_mnist_loader(cfg, args)
+        out_datasets = [args.in_dataset]
 
     trainer = build_trainer(cfg)
 
     trainer.load_model(args.model_dir, epoch=args.load_epoch)
+    if trainer.cfg.is_bonder and trainer.cfg.TRAINER=="LocProto":
+        trainer.model.text_prototypes = torch.load(osp.join(args.model_dir, 'proto.pth'))
 
-    id_data_loader = set_val_loader(args, preprocess)
 
-    in_score_mcm, in_score_gl = trainer.test_ood(id_data_loader, args.T)
+    if args.in_dataset in ['skin40', 'ISIC', 'Dermnet']:
+        out_datasets = [item for item in ['skin40', 'ISIC', 'Dermnet'] if item != args.in_dataset]
+        id_data_loader = trainer.dm.id_loader
+
+    trainer.test()
+    in_score_mcm, in_score_gl, in_score_loc, in_score_gen = trainer.test_ood(id_data_loader, args.T)
 
     auroc_list_mcm, aupr_list_mcm, fpr_list_mcm = [], [], []
     auroc_list_gl, aupr_list_gl, fpr_list_gl = [], [], []
+    auroc_list_loc, aupr_list_loc, fpr_list_loc = [], [], []
+    auroc_list_gen, aupr_list_gen, fpr_list_gen = [], [], []
 
     for out_dataset in out_datasets:
         print(f"Evaluting OOD dataset {out_dataset}")
-        ood_loader = set_ood_loader_ImageNet(args, out_dataset, preprocess)
-        out_score_mcm, out_score_gl = trainer.test_ood(ood_loader, args.T)
+        if out_dataset in ['iNaturalist', 'SUN', 'places365', 'Texture', 'skin40', 'ISIC', 'Dermnet']:
+            ood_loader = set_ood_loader_ImageNet(args, out_dataset, preprocess)
+        elif out_dataset in ['eurosat', 'fgvc_aircraft', 'stanford_cars', 'skin40', 'oxford_flowers', 'food101', 'ISIC', 'Dermnet']:
+            ood_loader = trainer.dm.ood_loader
+
+        out_score_mcm, out_score_gl, out_score_loc, out_score_gen = trainer.test_ood(ood_loader, args.T)
 
         print("MCM score")
         get_and_print_results(args, in_score_mcm, out_score_mcm,
                               auroc_list_mcm, aupr_list_mcm, fpr_list_mcm)
-
-        print("GL-MCM score")
-        get_and_print_results(args, in_score_gl, out_score_gl,
-                              auroc_list_gl, aupr_list_gl, fpr_list_gl)
-
+        
         plot_distribution(args, in_score_mcm, out_score_mcm, out_dataset, score='MCM')
-        plot_distribution(args, in_score_gl, out_score_gl, out_dataset, score='GLMCM')
 
     print("MCM avg. FPR:{}, AUROC:{}, AUPR:{}".format(np.mean(fpr_list_mcm), np.mean(auroc_list_mcm), np.mean(aupr_list_mcm)))
-    print("GL-MCM avg. FPR:{}, AUROC:{}, AUPR:{}".format(np.mean(fpr_list_gl), np.mean(auroc_list_gl), np.mean(aupr_list_gl)))
+
 
     return
 
@@ -154,8 +191,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=str, default="", help="path to dataset")
     parser.add_argument('--in_dataset', default='imagenet', type=str,
-                        choices=['imagenet'], help='in-distribution dataset')
-    parser.add_argument("--output-dir", type=str, default="", help="output directory")
+                        help='in-distribution dataset')
+    parser.add_argument("--output-dir", type=str, default="./png", help="output directory")
     parser.add_argument(
         "--resume",
         type=str,
@@ -200,6 +237,12 @@ if __name__ == "__main__":
     parser.add_argument('-b', '--batch-size', default=128, type=int,
                         help='mini-batch size')
     parser.add_argument('--T', type=float, default=1,
+                        help='temperature parameter')
+    parser.add_argument('--is_mine', type=bool, default=False,
+                        help='temperature parameter')
+    parser.add_argument('--is_bonder', type=bool, default=False,
+                        help='temperature parameter')
+    parser.add_argument('--is_dense', type=bool, default=False,
                         help='temperature parameter')
     args = parser.parse_args()
     main(args)

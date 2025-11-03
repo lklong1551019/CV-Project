@@ -5,7 +5,11 @@ from dassl.utils import setup_logger, set_random_seed, collect_env_info
 from dassl.config import get_cfg_default
 from dassl.engine import build_trainer
 import trainers.locoop
-import datasets.imagenet
+import trainers.locproto_supc
+import datasets.skin40
+import datasets.ISIC
+import datasets.Dermnet
+torch.cuda.empty_cache()
 
 
 def print_args(args, cfg):
@@ -50,6 +54,13 @@ def reset_cfg(cfg, args):
     if args.topk:
         cfg.topk = args.topk
 
+    cfg.is_mine = args.is_mine
+
+    cfg.is_bonder = args.is_bonder
+
+    cfg.is_dense = args.is_dense
+    cfg.is_sc = args.is_sc
+
 
 def extend_cfg(cfg):
     """
@@ -71,7 +82,23 @@ def extend_cfg(cfg):
     cfg.TRAINER.LOCOOP.PREC = "fp16"  # fp16, fp32, amp
     cfg.TRAINER.LOCOOP.CLASS_TOKEN_POSITION = "end"  # 'middle' or 'end' or 'front'
 
+    cfg.TRAINER.COOP = CN()
+    cfg.TRAINER.COOP.N_CTX = 16  # number of context vectors
+    cfg.TRAINER.COOP.CSC = False  # class-specific context
+    cfg.TRAINER.COOP.CTX_INIT = ""  # initialization words
+    cfg.TRAINER.COOP.PREC = "fp16"  # fp16, fp32, amp
+    cfg.TRAINER.COOP.CLASS_TOKEN_POSITION = "end"  # 'middle' or 'end' or 'front'
+
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
+
+    cfg.Adapter = CN()
+    cfg.Adapter.Layer_ID = [10, 11]  # 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 
+    cfg.Adapter.Scale = 1.0
+    cfg.Adapter.Down_Rate = 256
+    cfg.Adapter.Attn = True
+    cfg.Adapter.MLP = True
+    cfg.Adapter.Visual = False
+    cfg.Adapter.Text = False
 
 
 def setup_cfg(args):
@@ -92,7 +119,7 @@ def setup_cfg(args):
     # 4. From optional input arguments
     cfg.merge_from_list(args.opts)
 
-    cfg.freeze()
+    # cfg.freeze()
 
     return cfg
 
@@ -171,6 +198,13 @@ if __name__ == "__main__":
                         help='weight for regulization loss')
     parser.add_argument('--topk', type=int, default=200,
                         help='topk for extracted OOD regions')
-
+    parser.add_argument('--is_mine', type=bool, default=False,
+                        help='projection on local featrues')
+    parser.add_argument('--is_bonder', type=bool, default=False,
+                        help='projection on local featrues')
+    parser.add_argument('--is_dense', type=bool, default=False,
+                        help='projection on local featrues')
+    parser.add_argument('--is_sc', type=bool, default=False,
+                        help='projection on local featrues')
     args = parser.parse_args()
     main(args)

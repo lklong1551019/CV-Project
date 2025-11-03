@@ -3,8 +3,12 @@ import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 import sklearn.metrics as sk
-import clip_w_local
-
+# import clip_w_local
+from sklearn.covariance import EmpiricalCovariance
+from numpy.linalg import norm, pinv
+from scipy.special import logsumexp, softmax
+import matplotlib.pyplot as plt
+import faiss, time
 
 def print_measures(log, auroc, aupr, fpr, method_name='Ours', recall_level=0.95):
     if log is None:

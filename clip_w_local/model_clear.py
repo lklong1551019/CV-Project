@@ -172,7 +172,7 @@ class QuickGELU(nn.Module):
 
 
 class ResidualAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None):
+    def __init__(self, d_model: int, n_head: int, layer_id, attn_mask: torch.Tensor = None):
         super().__init__()
 
         self.attn = nn.MultiheadAttention(d_model, n_head)
@@ -185,7 +185,10 @@ class ResidualAttentionBlock(nn.Module):
         self.ln_2 = LayerNorm(d_model)
         self.attn_mask = attn_mask
 
+        self.layer_id = layer_id
+
     def attention(self, x: torch.Tensor, mask=None):
+        # self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
         if self.attn_mask is not None:
             self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device)
             return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
@@ -196,27 +199,39 @@ class ResidualAttentionBlock(nn.Module):
             self.attn_mask = None
             return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
 
-
-    def attention_weight(self, x: torch.Tensor):  # ADDED
-        self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
+    def attention_weight(self, x: torch.Tensor, mask=None):  # ADDED
+        if self.attn_mask is not None:
+            self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device)
+        elif mask is not None:
+            self.attn_mask = mask
+        else:
+            self.attn_mask = None
         return self.attn(x, x, x, need_weights=True, attn_mask=self.attn_mask)[1]
 
-    def forward(self, x: torch.Tensor, return_attention: bool = False, mask=None):
-        y = self.ln_1(x)
+    def forward(self, x: torch.Tensor, return_attention: bool = False, mask=None, adapter=None):
+        y = self.ln_1(x)   
         y = y.permute(1, 0, 2)
-        y = F.linear(y, self.attn.in_proj_weight, self.attn.in_proj_bias)   # multi-head的in_proj
+        y = F.linear(y, self.attn.in_proj_weight, self.attn.in_proj_bias)  
         N, L, C = y.shape
         y = y.view(N, L, 3, C // 3).permute(2, 0, 1, 3).reshape(3 * N, L, C // 3)
-        y = F.linear(y, self.attn.out_proj.weight, self.attn.out_proj.bias)     # multi-head的out_proj
-        q, k, v = y.tensor_split(3, dim=0)  # 得到q k v
+        y = F.linear(y, self.attn.out_proj.weight, self.attn.out_proj.bias)  
+        q, k, v = y.tensor_split(3, dim=0) 
         v = v.permute(1, 0, 2)
         q = q.permute(1, 0, 2)
         k = k.permute(1, 0, 2)
-        v += x
+        v += x  
         v = v + self.mlp(self.ln_2(v))
 
-        x = x + self.attention(self.ln_1(x), mask)
-        x = x + self.mlp(self.ln_2(x))
+        if adapter is None:
+            x = x + self.attention(self.ln_1(x), mask)
+            x = x + self.mlp(self.ln_2(x))
+        else:
+            x = x + adapter(self.attention(self.ln_1(x), mask),
+                            self.layer_id,
+                            pos='attn')
+            x = x + adapter(self.mlp(self.ln_2(x)),
+                            self.layer_id,
+                            pos='mlp')
 
         return x, q, k, v
 
@@ -225,13 +240,72 @@ class Transformer(nn.Module):
         super().__init__()
         self.width = width
         self.layers = layers
-        self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask) for _ in range(layers)])
+        self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, i, attn_mask) for i in range(layers)])
+        # self.resblock = ResidualAttentionBlock(width, heads, attn_mask)
 
-    def forward(self, x: torch.Tensor, mask=None):
+    def custom_attn(self, attn_layer, x, model_type='ClearCLIP',  key_padding_mask=None):
+
+        num_heads = attn_layer.num_heads
+        _, bsz, embed_dim = x.size()
+        head_dim = embed_dim // num_heads
+        scale = head_dim ** -0.5
+
+        q, k, v = F.linear(x, attn_layer.in_proj_weight, attn_layer.in_proj_bias).chunk(3, dim=-1)   # 得到q k v
+        q = q.contiguous().view(-1, bsz * num_heads, head_dim).transpose(0, 1)
+        k = k.contiguous().view(-1, bsz * num_heads, head_dim).transpose(0, 1)
+        v = v.contiguous().view(-1, bsz * num_heads, head_dim).transpose(0, 1)
+
+        if model_type == 'vanilla':
+            qk_attn = torch.bmm(q, k.transpose(1, 2)) * scale
+            # attn_weights = F.softmax(qk_attn, dim=-1)
+            if key_padding_mask is not None:
+                # 将布尔 mask 转换为适当的形状
+                key_padding_mask = key_padding_mask.repeat(num_heads, 1)
+                key_padding_mask = key_padding_mask.unsqueeze(1)  # [2, 1, 10]
+                qk_attn.masked_fill_(key_padding_mask, float('-inf'))
+            attn_weights = F.softmax(qk_attn, dim=-1)
+        elif model_type == 'MaskCLIP':
+            mask = torch.empty(q.shape[1], q.shape[1], dtype=q.dtype).to(q.device)
+            mask.fill_(float('-inf'))
+            mask.fill_diagonal_(0)
+            mask = mask.unsqueeze(0).repeat(q.shape[0], 1, 1)
+            attn_weights = F.softmax(mask, dim=-1)
+        elif model_type == 'SCLIP':
+            qq_attn = torch.bmm(q, q.transpose(1, 2)) * scale
+            kk_attn = torch.bmm(k, k.transpose(1, 2)) * scale
+            attn_weights = F.softmax(qq_attn, dim=-1) + F.softmax(kk_attn, dim=-1)
+        elif model_type == 'ClearCLIP':
+            qq_attn = torch.bmm(q, q.transpose(1, 2)) * scale
+            attn_weights = F.softmax(qq_attn, dim=-1)
+
+        attn_output = torch.bmm(attn_weights, v)
+        attn_output = attn_output.transpose(0, 1).contiguous().view(-1, bsz, embed_dim) 
+        attn_output = attn_layer.out_proj(attn_output)    
+
+        return attn_output
+
+    def forward(self, x: torch.Tensor, ignore_residual=True, mask=None, adapter=None):
         # return self.resblocks(x)
-        for i in range(self.layers):
-            x, q, k, v = self.resblocks[i](x, mask=mask)
-        return x, q, k, v
+        for i in range(self.layers-1):
+            x, q, k, v = self.resblocks[i](x, mask=mask, adapter=adapter)
+        # 最后一层，不要影响cls token
+        blk = self.resblocks[-1]  # 最后一层
+        # attention mask不一样？
+        if x.shape[-1] == 512: # 是text encoder         or mask!=None
+            # 把cls token遮盖掉？
+            # if mask!=None:
+            #     mask[:, 0] = True
+            x, q, k, v = blk(x, adapter=adapter)
+            return x, q, k, v
+        else:
+            if ignore_residual:
+                attn_out = self.custom_attn(blk.attn, blk.ln_1(x), model_type="vanilla", key_padding_mask=mask)
+            # attn_out = output.permute(1, 0, 2)
+            x = attn_out + x   
+
+            x = x + blk.mlp(blk.ln_2(x))
+
+            return x, attn_out, None, None
 
 class Adapter(nn.Module):
     def __init__(self, c_in, reduction=4):
@@ -251,7 +325,6 @@ class Adapter(nn.Module):
         x = self.fc(x)
         return x
 
-
 class VisionTransformer(nn.Module):
     def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, is_mine=False):
         super().__init__()
@@ -270,10 +343,9 @@ class VisionTransformer(nn.Module):
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
         self.is_mine = is_mine
         if is_mine==True:
-            # pass
             self.linear = Adapter(output_dim)
 
-    def forward(self, x: torch.Tensor, text_feats=None, label=None, mask=None):
+    def forward(self, x: torch.Tensor, text_feats=None, label=None, mask=None, adapter=None):
         x = self.conv1(x)  # shape = [*, width, grid, grid]   [32, 768, 14, 14]
         hw_shape = (x.shape[2], x.shape[3])
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]   [32, 768, 196]
@@ -282,32 +354,25 @@ class VisionTransformer(nn.Module):
         x = x + self.positional_embedding.to(x.dtype)
         x = self.ln_pre(x)
 
-        x = x.permute(1, 0, 2)  # NLD -> LND   [196, 32, 768]
-        x, q, k, v = self.transformer(x, mask=mask)
-        x = x.permute(1, 0, 2)  # LND -> NLD
-        q = q.permute(1, 0, 2)
-        k = k.permute(1, 0, 2)
-        v = v.permute(1, 0, 2)
+        x = x.permute(1, 0, 2)  # NLD -> LND   [197, 32, 768]
+        x, attn_out, _, _ = self.transformer(x, mask=mask, adapter=adapter)
 
-        v = self.ln_post(v)
-
-        q = q[:, 1:]
-        k = k[:, 1:]
-        v = v[:, 1:]
-
-        out = x[:, 1:]
-        B, _, C = out.shape
-        v = v.reshape(B, -1, C).contiguous()
+        attn_out = attn_out.permute(1, 0, 2)    # [32, 197, 768]
+        x = x.permute(1, 0, 2)
+        attn_out = attn_out[:, 1:]
+        B, _, C = attn_out.shape
+        attn_out = attn_out.reshape(B, -1, C).contiguous()
+        attn_out = self.ln_post(attn_out) 
 
         x = self.ln_post(x[:, 0, :])
 
         if self.proj is not None:
             x = x @ self.proj
-            feat = v @ self.proj
+            feat = attn_out @ self.proj
         
         if self.is_mine==True:  # and label!=None
-            ratio = 0.2
-            feat = (1 - ratio) * feat + ratio * self.linear(feat)    # [bs, 196, 512]
+            ratio = 0.5
+            feat = (1- ratio) * feat + ratio * self.linear(feat)    # [bs, 196, 512]
             return x, feat, None
         else:
             return x, feat, None
@@ -412,15 +477,15 @@ class CLIP(nn.Module):
     def dtype(self):
         return self.visual.conv1.weight.dtype
 
-    def encode_image(self, image, mask=None):
-        return self.visual(image.type(self.dtype), mask=mask)
+    def encode_image(self, image, mask=None, adapter=None):
+        return self.visual(image.type(self.dtype), mask=mask, adapter=adapter)
 
-    def encode_text(self, text):
+    def encode_text(self, text, adapter=None):
         x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
 
         x = x + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
-        x, q, k, v = self.transformer(x)
+        x, q, k, v = self.transformer(x, adapter)
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
 
