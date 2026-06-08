@@ -12,6 +12,7 @@ import trainers.locproto_supc
 import datasets.skin40
 import datasets.ISIC
 import datasets.Dermnet
+import datasets.btxrd
 from os import path as osp
 
 def print_args(args, cfg):
@@ -141,8 +142,11 @@ def main(args):
         trainer.model.text_prototypes = torch.load(osp.join(args.model_dir, 'proto.pth'))
 
 
-    if args.in_dataset in ['skin40', 'ISIC', 'Dermnet']:
-        out_datasets = [item for item in ['skin40', 'ISIC', 'Dermnet'] if item != args.in_dataset]
+    if args.in_dataset in ['skin40', 'ISIC', 'Dermnet', 'btxrd']:
+        if args.in_dataset == 'btxrd':
+            out_datasets = ['btxrd']
+        else:
+            out_datasets = [item for item in ['skin40', 'ISIC', 'Dermnet'] if item != args.in_dataset]
         id_data_loader = trainer.dm.id_loader
 
     trainer.test()
@@ -157,7 +161,7 @@ def main(args):
         print(f"Evaluting OOD dataset {out_dataset}")
         if out_dataset in ['iNaturalist', 'SUN', 'places365', 'Texture', 'skin40', 'ISIC', 'Dermnet']:
             ood_loader = set_ood_loader_ImageNet(args, out_dataset, preprocess)
-        elif out_dataset in ['eurosat', 'fgvc_aircraft', 'stanford_cars', 'skin40', 'oxford_flowers', 'food101', 'ISIC', 'Dermnet']:
+        elif out_dataset in ['eurosat', 'fgvc_aircraft', 'stanford_cars', 'skin40', 'oxford_flowers', 'food101', 'ISIC', 'Dermnet', 'btxrd']:
             ood_loader = trainer.dm.ood_loader
 
         out_score_mcm, out_score_gl, out_score_loc, out_score_gen = trainer.test_ood(ood_loader, args.T)

@@ -228,14 +228,18 @@ class CustomCLIP(nn.Module):
         template = CUSTOM_TEMPLATES[cfg.DATASET.NAME]
         all_prompt = []
         print(classnames)
+        # Determine number of descriptions from the first class
+        first_class = classnames[0].replace("_", " ")
+        n_desc = len(llm_descriptions[first_class])
         for classname in classnames:
             prompts = []
             prompt = template.format(classname.replace("_", " "))
             prompts.append(prompt)
 
             # get descriptions
-            for i in range(50):
-                prompt_desc = prompt + ' ' + llm_descriptions[classname.replace("_", " ")][i]
+            class_descs = llm_descriptions[classname.replace("_", " ")]
+            for i in range(n_desc):
+                prompt_desc = prompt + ' ' + class_descs[i]
                 prompts.append(prompt_desc)
             prompts = torch.cat([clip.tokenize(p) for p in prompts]).cuda()
             all_prompt.append(prompts)
@@ -247,7 +251,7 @@ class CustomCLIP(nn.Module):
 
         text_features = torch.cat(text_features) # (n_cls x n_desc) x d
         _, d = text_features.shape
-        self.ndisc = 51
+        self.ndisc = n_desc + 1  # +1 for the base prompt
         text_features = text_features.view(self.ndisc, -1, d)
         self.all_text_features_tea = text_features / text_features.norm(dim=-1, keepdim=True)
         text_features = text_features.mean(dim=0)

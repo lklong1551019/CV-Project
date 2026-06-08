@@ -40,6 +40,7 @@ CUSTOM_TEMPLATES = {
     "Dermnet": "a photo of a {}, a type of skin disease.",
     "RFMiD": "a photo of a {}, a type of fundus disease.",
     "ISIC2": "a photo of a {}, a type of skin disease.",
+    "BTXRD": "an X-ray of a {}, a type of bone tumor.",
 }
 
 def entropy_select_topk(p, top_k, label, num_of_local_feature=196):

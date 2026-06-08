@@ -32,6 +32,7 @@ CUSTOM_TEMPLATES = {
     "ImageNetR": "a photo of a {}.",
     "Skin40": "a photo of a {}",
     "chest": "a photo of a {}",
+    "BTXRD": "an X-ray of a {}, a type of bone tumor.",
 }
 
 def load_clip_to_cpu(cfg):
