@@ -9,6 +9,7 @@ import trainers.locproto_supc
 import datasets.skin40
 import datasets.ISIC
 import datasets.Dermnet
+import datasets.btxrd
 torch.cuda.empty_cache()
 
 
@@ -125,10 +126,14 @@ def setup_cfg(args):
 
 
 def main(args):
+    # [1] Thiết lập cấu hình (config) ban đầu dựa vào arguments truyền vào từ train.sh
     cfg = setup_cfg(args)
     if cfg.SEED >= 0:
+        # [2] Đặt seed cố định (ví dụ 1) cho torch, numpy, random
+        # Đảm bảo kết quả có thể tái lập (reproducible) khi chạy lại
         print("Setting fixed seed: {}".format(cfg.SEED))
         set_random_seed(cfg.SEED)
+    # Khởi tạo thư mục đầu ra để lưu checkpoint, log
     setup_logger(cfg.OUTPUT_DIR)
 
     if torch.cuda.is_available() and cfg.USE_CUDA:
@@ -138,6 +143,10 @@ def main(args):
     print("Collecting env info ...")
     print("** System info **\n{}\n".format(collect_env_info()))
 
+    print("Building trainer: {}".format(cfg.TRAINER.NAME))
+    # [3] Khởi tạo lớp Trainer (ví dụ LocProto).
+    # Quá trình này sẽ tự động gọi build_model() (để load CLIP)
+    # và build_data_loader() (để chuẩn bị dataset btxrd).
     trainer = build_trainer(cfg)
 
     if args.eval_only:
@@ -146,6 +155,8 @@ def main(args):
         return
 
     if not args.no_train:
+        # [4] Bắt đầu vòng lặp huấn luyện chính
+        # Chạy qua các epochs -> batches -> tính loss -> backward -> cập nhật weights
         trainer.train()
 
 

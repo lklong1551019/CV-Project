@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Our project
+datasets/btxrd/split_*
+
+
 # C extensions
 *.so
 
