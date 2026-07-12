@@ -30,7 +30,7 @@ echo "============================================"
 echo "  Collecting metrics from: ${DIR}"
 echo "============================================"
 
-python collect_metrics.py \
+CUDA_VISIBLE_DEVICES=0 python collect_metrics.py \
     --output-dir ${DIR} \
     --root ${DATA} \
     --dataset ${DATASET} \
