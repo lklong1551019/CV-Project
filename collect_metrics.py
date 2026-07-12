@@ -252,13 +252,15 @@ def plot_training_curves(epoch_data, save_dir):
 
     # --- Plot 2: Accuracy ---
     acc_tags = [t for t in epoch_data if 'acc' in t.lower()]
+    acc_colors = ['#2196F3', '#FF9800', '#4CAF50', '#E91E63']  # blue, orange, green, pink
     if acc_tags:
         fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-        for tag in acc_tags:
+        for i, tag in enumerate(acc_tags):
             epochs = sorted(epoch_data[tag].keys())
             values = [epoch_data[tag][e] for e in epochs]
             label = tag.replace("train/", "")
-            ax.plot(epochs, values, label=label, linewidth=1.5, color='green')
+            color = acc_colors[i % len(acc_colors)]
+            ax.plot(epochs, values, label=label, linewidth=1.5, color=color)
         ax.set_xlabel('Epoch', fontsize=12)
         ax.set_ylabel('Accuracy (%)', fontsize=12)
         ax.set_title('Training Accuracy', fontsize=14, fontweight='bold')
