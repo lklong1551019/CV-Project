@@ -418,7 +418,7 @@ class LocProto(TrainerX):
                 # calculate CoOp loss
                 loss_id = F.cross_entropy(output, label)
                 loss_distil_img = F.l1_loss(img_feat_tea, img_feat_stu,
-                                      reduction='mean') * 10
+                                      reduction='mean') * 25 # 10 --> 25
                 loss_distil_text = F.l1_loss(self.model.all_text_features_tea, text_stu,
                                       reduction='mean') * 1 # 25 --> 1
                 loss = loss_id + loss_distil_img + loss_distil_text
@@ -432,7 +432,7 @@ class LocProto(TrainerX):
             all_text_features_tea = self.model.all_text_features_tea.clone()
             loss_id = F.cross_entropy(output, label)
             loss_distil_img = F.l1_loss(img_feat_tea, img_feat_stu,
-                                    reduction='mean') * 10
+                                    reduction='mean') * 25 # 10 --> 25
             loss_distil_text = F.l1_loss(all_text_features_tea, text_stu,
                                     reduction='mean') * 1 # 25 --> 1
             
