@@ -29,9 +29,9 @@ softmax = nn.Softmax(dim=1).cuda()
 
 import numpy as np
 
-LAMBDA_SC = 0.5
-LAMBDA_I = 10
-LAMBDA_T = 25
+LAMBDA_SC = 10
+LAMBDA_I = 25
+LAMBDA_T = 1
 
 
 def entropy_select_topk(p, top_k, label, num_of_local_feature):
