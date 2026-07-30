@@ -29,6 +29,10 @@ softmax = nn.Softmax(dim=1).cuda()
 
 import numpy as np
 
+LAMBDA_SC = 0.5
+LAMBDA_I = 10
+LAMBDA_T = 25
+
 
 def entropy_select_topk(p, top_k, label, num_of_local_feature):
     """
@@ -418,9 +422,9 @@ class LocProto(TrainerX):
                 # calculate CoOp loss
                 loss_id = F.cross_entropy(output, label)
                 loss_distil_img = F.l1_loss(img_feat_tea, img_feat_stu,
-                                      reduction='mean') * 25 # 10 --> 25
+                                      reduction='mean') * LAMBDA_I # 10 --> 25
                 loss_distil_text = F.l1_loss(self.model.all_text_features_tea, text_stu,
-                                      reduction='mean') * 1 # 25 --> 1
+                                      reduction='mean') * LAMBDA_T # 25 --> 1
                 loss = loss_id + loss_distil_img + loss_distil_text
 
             self.optim.zero_grad()
@@ -432,12 +436,12 @@ class LocProto(TrainerX):
             all_text_features_tea = self.model.all_text_features_tea.clone()
             loss_id = F.cross_entropy(output, label)
             loss_distil_img = F.l1_loss(img_feat_tea, img_feat_stu,
-                                    reduction='mean') * 25 # 10 --> 25
+                                    reduction='mean') * LAMBDA_I # 10 --> 25
             loss_distil_text = F.l1_loss(all_text_features_tea, text_stu,
-                                    reduction='mean') * 1 # 25 --> 1
+                                    reduction='mean') * LAMBDA_T # 25 --> 1
             
             loss_id2 = F.cross_entropy(output_local, label)
-            loss_supc = get_supc_loss(img_feat_stu, id_loc_feats, ood_loc_feats, l2p, l2p_tea, label, topk=self.top_k) * 10 # 0.5 --> 10
+            loss_supc = get_supc_loss(img_feat_stu, id_loc_feats, ood_loc_feats, l2p, l2p_tea, label, topk=self.top_k) * LAMBDA_SC # 0.5 --> 10
             loss = loss_id + loss_id2 + loss_distil_img + loss_distil_text + loss_supc
 
             self.model_backward_and_update(loss)
