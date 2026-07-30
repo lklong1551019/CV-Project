@@ -145,7 +145,7 @@ def run_ood_evaluation(output_dir, root="./datasets", dataset="btxrd",
     cfg.is_bonder = True
     cfg.is_dense = True
     cfg.lambda_value = 0.99
-    cfg.topk = 50
+    cfg.topk = 40
 
     if cfg.SEED >= 0:
         set_random_seed(cfg.SEED)

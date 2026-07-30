@@ -60,7 +60,7 @@ lambda=0.99
 # topk: số local patches được chọn để căn chỉnh với text
 #   ViT-B/16 tạo ra 196 patches (14x14 grid)
 #   topk=50 chọn 50 patches có entropy thấp nhất (patch tự tin nhất về dự đoán)
-topk=25
+topk=40
 
 # =============================================================================
 # VÒNG LẶP HUẤN LUYỆN
