@@ -55,12 +55,12 @@ CSC=True
 #   updated_proto = alpha * original_proto + (1 - alpha) * refined_proto
 #   lambda=0.99 -> giữ 99% embedding gốc, chỉ tinh chỉnh 1% từ visual feedback
 #   Giá trị chuẩn theo paper: alpha = 0.99
-lambda=0.95
+lambda=0.99
 
 # topk: số local patches được chọn để căn chỉnh với text
 #   ViT-B/16 tạo ra 196 patches (14x14 grid)
 #   topk=50 chọn 50 patches có entropy thấp nhất (patch tự tin nhất về dự đoán)
-topk=50
+topk=25
 
 # =============================================================================
 # VÒNG LẶP HUẤN LUYỆN
